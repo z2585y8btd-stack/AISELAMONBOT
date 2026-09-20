@@ -50,6 +50,7 @@ SYSTEM_PROMPT = """أنت مساعد تيليجرام سعودي ذكي ولطي
 - لا تخترع معلومات. إذا لم تكن متأكدًا فاذكر ذلك بوضوح.
 - كن لطيفًا وخفيف دم، واستخدم الإيموجي باعتدال.
 - لا تسأل أسئلة غير ضرورية؛ وإذا كان الطلب واضحًا نفذه مباشرة.
+- إذا سأل المستخدم «وش نوعك؟» أو عن نوعك، أجب حرفيًا: «انا بوت اقصد بوث 😝».
 - لا تستخدم محتوى جنسيًا صريحًا أو يستغل القاصرين أو يتضمن إكراهًا.
 """
 
@@ -126,8 +127,18 @@ def is_channel_link_request(text: str) -> bool:
     )
 
 
+def is_type_question(text: str) -> bool:
+    normalized = " ".join(text.strip().lower().split())
+    return any(
+        phrase in normalized
+        for phrase in ("وش نوعك", "وش نوعك؟", "وش انت", "وش أنت", "ما نوعك", "ايش نوعك", "إيش نوعك")
+    )
+
+
 def fallback_reply(text: str) -> str:
     lowered = text.strip().lower()
+    if is_type_question(text):
+        return "انا بوت اقصد بوث 😝"
     if any(word in lowered for word in ("هلا", "مرحبا", "السلام", "hello")):
         return "يا هلا والله 🧡 نورت!"
     if "شكرا" in lowered or "مشكور" in lowered:
@@ -162,7 +173,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message:
         context.user_data["ai_history"] = []
         await update.message.reply_text(
-            "يا هلا! نورت يا بعدي 🥹🧡\n\nتقدر تدخل القناة أو ترسل رسالة مباشرة لصاحب البوت:",
+            "نوت ⭐️🧡",
             reply_markup=channel_keyboard(),
         )
 
@@ -276,6 +287,9 @@ async def respond(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if is_channel_link_request(text):
         await send_channel_link(update, context)
         return
+    if is_type_question(text):
+        await message.reply_text("انا بوت اقصد بوث 😝")
+        return
     if not client:
         reply = fallback_reply(text)
     else:
@@ -300,8 +314,6 @@ async def respond(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as error:
             error_code = openai_error_code(error)
             if error_code in OPENAI_QUOTA_ERROR_CODES:
-                # Quota will not recover during this process, so avoid repeatedly
-                # calling OpenAI and use local replies until the bot restarts.
                 client = None
                 logger.warning(
                     "OpenAI quota exhausted (%s); switching to local replies",

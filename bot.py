@@ -1,15 +1,24 @@
+import html
 import json
 import logging
 import os
+import re
+import unicodedata
 from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
 
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Update
-from telegram.constants import ChatAction
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Message, Update
+from telegram.constants import ChatAction, ParseMode
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
-    Application, CallbackQueryHandler, CommandHandler, ContextTypes,
-    MessageHandler, PreCheckoutQueryHandler, filters,
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    PreCheckoutQueryHandler,
+    filters,
 )
 
 try:
@@ -32,16 +41,113 @@ SNAPCHAT_USERNAME = "Sela.mon"
 SNAPCHAT_PRICE = 100
 SNAPCHAT_PAYLOAD_PREFIX = "snapchat_100_stars"
 MAX_HISTORY_MESSAGES = 20
-OPENAI_QUOTA_ERROR_CODES = {"insufficient_quota", "credit_balance_exhausted"}
+TELEGRAM_TEXT_LIMIT = 4096
+# Leave room below Telegram's limit and avoid splitting at the edge.
+TELEGRAM_CHUNK_LIMIT = 4000
 
 SYSTEM_PROMPT = """أنت مساعد تيليجرام سعودي ذكي ولطيف وخفيف دم.
 أجب باللهجة السعودية إذا كان المستخدم يتحدث بالعربية، وكن مفيدًا ولطيفًا.
 إذا سأل المستخدم وش نوعك أو ما نوعك فأجب حرفيًا: انا بوت اقصد بوث 😝.
-لا تستخدم محتوى جنسيًا صريحًا أو يستغل القاصرين أو يتضمن إكراهًا."""
+لا تستخدم محتوى جنسيًا صريحًا أو يستغل القاصرين أو يتضمن إكراهًا.
+لا تخرج رموز ChatML أو delimiters أو أي رموز خاصة بالنموذج مثل <|im_start|> أو <|im_end|>.
+أرسل نصًا عاديًا فقط، بدون HTML أو XML."""
 
-client: Optional[AsyncOpenAI] = None
-if OPENAI_API_KEY and AsyncOpenAI:
-    client = AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=45.0, max_retries=2)
+CHATML_RE = re.compile(
+    r"<\|\s*(?:im_start|im_end|system|user|assistant|tool|endoftext)\s*\|>"
+    r"|\|\s*(?:im_start|im_end|system|user|assistant|tool)\s*\|",
+    re.IGNORECASE,
+)
+ZERO_WIDTH_CHARS = {"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff"}
+
+
+def _clean_ai_text(text: str) -> str:
+    """Return plain, user-facing text with model/control artifacts removed."""
+    value = str(text or "")
+    value = CHATML_RE.sub("", value)
+    value = re.sub(r"\b(?:im_start|im_end)\b", "", value, flags=re.IGNORECASE)
+    value = "".join(char for char in value if char not in ZERO_WIDTH_CHARS)
+    value = "".join(char for char in value if char in "\n\t" or not unicodedata.category(char).startswith("C"))
+    # Normalize horizontal whitespace while retaining readable paragraph breaks.
+    value = re.sub(r"[ \t]+", " ", value)
+    value = re.sub(r"\n[ \t]+", "\n", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip()
+
+
+def sanitize_ai_response(text: str) -> str:
+    """Sanitize arbitrary model output for Telegram HTML mode.
+
+    The complete response is escaped deliberately. This prevents arbitrary or
+    malformed model-generated HTML from being interpreted by Telegram.
+    """
+    return html.escape(_clean_ai_text(text), quote=False)
+
+
+def _split_text(text: str, limit: int = TELEGRAM_CHUNK_LIMIT) -> list[str]:
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > limit:
+        split_at = remaining.rfind("\n", 0, limit + 1)
+        if split_at <= 0:
+            split_at = remaining.rfind(" ", 0, limit + 1)
+        if split_at <= 0:
+            split_at = limit
+        chunks.append(remaining[:split_at].rstrip())
+        remaining = remaining[split_at:].lstrip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks or [""]
+
+
+def _is_html_parse_error(error: TelegramError) -> bool:
+    message = str(error).lower()
+    return isinstance(error, BadRequest) and (
+        "can't parse entities" in message
+        or "unsupported start tag" in message
+        or "can't find end tag" in message
+        or "parse entities" in message
+    )
+
+
+async def reply_ai_response(message: Message, text: str) -> None:
+    """Send AI output safely, retrying plain text if Telegram rejects HTML."""
+    safe_html = sanitize_ai_response(text)
+    plain_text = html.unescape(safe_html)
+    for chunk in _split_text(safe_html):
+        try:
+            await message.reply_text(chunk, parse_mode=ParseMode.HTML)
+        except TelegramError as error:
+            if not _is_html_parse_error(error):
+                logger.exception("Telegram failed while sending AI response")
+                return
+            logger.warning("Telegram rejected sanitized HTML; retrying as plain text: %s", error)
+            try:
+                plain_chunk = html.unescape(chunk)
+                await message.reply_text(plain_chunk, parse_mode=None)
+            except TelegramError:
+                logger.exception("Telegram failed while sending plain AI fallback")
+                return
+
+
+async def post_init(application: Application) -> None:
+    """Create exactly one OpenAI client after the event loop is running."""
+    if OPENAI_API_KEY and AsyncOpenAI:
+        application.bot_data["openai_client"] = AsyncOpenAI(
+            api_key=OPENAI_API_KEY,
+            timeout=45.0,
+            max_retries=2,
+        )
+    await set_commands(application)
+
+
+async def post_shutdown(application: Application) -> None:
+    """Close application-owned async resources during a graceful shutdown."""
+    openai_client: Optional[AsyncOpenAI] = application.bot_data.pop("openai_client", None)
+    if openai_client is not None:
+        try:
+            await openai_client.close()
+        except Exception:
+            logger.exception("Could not close the AsyncOpenAI client")
 
 
 def load_store() -> dict[str, Any]:
@@ -136,15 +242,11 @@ async def create_snapchat_invoice(update: Update, context: ContextTypes.DEFAULT_
     payload = f"{SNAPCHAT_PAYLOAD_PREFIX}:{query.from_user.id}:{uuid4().hex}"
     try:
         await query.message.reply_invoice(
-            title="Snapchat account",
-            description="Snapchat account — 100 ⭐️",
-            payload=payload,
-            currency="XTR",
-            prices=[LabeledPrice("Snapchat account", SNAPCHAT_PRICE)],
-            provider_token="",
-            start_parameter="snapchat-sela-mon",
+            title="Snapchat account", description="Snapchat account — 100 ⭐️", payload=payload,
+            currency="XTR", prices=[LabeledPrice("Snapchat account", SNAPCHAT_PRICE)],
+            provider_token="", start_parameter="snapchat-sela-mon",
         )
-    except Exception:
+    except TelegramError:
         logger.exception("Could not create Stars invoice")
         await query.message.reply_text("تعذر فتح الدفع الآن. تأكد أن البوت محدث ومفعل على Telegram Stars.")
 
@@ -153,12 +255,8 @@ async def precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     query = update.pre_checkout_query
     if not query:
         return
-    valid = (query.currency == "XTR" and query.total_amount == SNAPCHAT_PRICE and
-             query.invoice_payload.startswith(SNAPCHAT_PAYLOAD_PREFIX + ":"))
-    if valid:
-        await query.answer(ok=True)
-    else:
-        await query.answer(ok=False, error_message="بيانات الدفع غير صحيحة، حاول مرة أخرى.")
+    valid = query.currency == "XTR" and query.total_amount == SNAPCHAT_PRICE and query.invoice_payload.startswith(SNAPCHAT_PAYLOAD_PREFIX + ":")
+    await query.answer(ok=valid, error_message=None if valid else "بيانات الدفع غير صحيحة، حاول مرة أخرى.")
 
 
 async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -168,13 +266,11 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     if payment.currency != "XTR" or payment.total_amount != SNAPCHAT_PRICE:
         return
-    record = {
+    STORE["payments"].append({
         "product": "snapchat", "user_id": message.from_user.id,
         "username": message.from_user.username or "", "amount": payment.total_amount,
-        "currency": payment.currency,
-        "telegram_payment_charge_id": payment.telegram_payment_charge_id,
-    }
-    STORE["payments"].append(record)
+        "currency": payment.currency, "telegram_payment_charge_id": payment.telegram_payment_charge_id,
+    })
     save_store()
     await message.reply_text(f"تم الدفع بنجاح ✅\n\nحساب Snapchat الخاص بك هو:\n{SNAPCHAT_USERNAME} 👻")
     try:
@@ -182,7 +278,7 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
             chat_id=ADMIN_ID,
             text=f"💰 عملية شراء Snapchat\nالمستخدم: {message.from_user.id}\nالمبلغ: 100 نجمة\nCharge ID: {payment.telegram_payment_charge_id}",
         )
-    except Exception:
+    except TelegramError:
         logger.exception("Could not notify admin")
 
 
@@ -192,18 +288,16 @@ async def deliver_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return False
     record = user_record(message.from_user.id, message.from_user)
     username = f"\n👤 username: @{message.from_user.username}" if message.from_user.username else ""
-    header = await message.get_bot().send_message(
-        chat_id=ADMIN_ID,
-        text=f"📩 رسالة جديدة من {display_name(record)}\n🆔 ID: {message.from_user.id}{username}",
-    )
-    STORE["admin_messages"][str(header.message_id)] = message.from_user.id
     try:
+        header = await message.get_bot().send_message(chat_id=ADMIN_ID, text=f"📩 رسالة جديدة من {display_name(record)}\n🆔 ID: {message.from_user.id}{username}")
+        STORE["admin_messages"][str(header.message_id)] = message.from_user.id
         copied = await message.copy(chat_id=ADMIN_ID, reply_to_message_id=header.message_id)
         STORE["admin_messages"][str(copied.message_id)] = message.from_user.id
-    except Exception:
-        logger.exception("Could not copy user message")
-    save_store()
-    await message.reply_text("وصلت رسالتك لصاحب البوت ✅ إذا رد، يوصلك الرد هنا.")
+        save_store()
+        await message.reply_text("وصلت رسالتك لصاحب البوت ✅ إذا رد، يوصلك الرد هنا.")
+    except TelegramError:
+        logger.exception("Could not deliver user message to admin")
+        await message.reply_text("تعذر إرسال رسالتك الآن، حاول لاحقًا.")
     return True
 
 
@@ -218,7 +312,8 @@ async def admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> boo
     try:
         await message.copy(chat_id=int(recipient_id))
         await message.reply_text("تم إرسال الرد ✅")
-    except Exception:
+    except TelegramError:
+        logger.exception("Could not send admin reply")
         await message.reply_text("ما قدرت أرسل الرد؛ يمكن المستخدم حظر البوت.")
     return True
 
@@ -243,14 +338,10 @@ async def people(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.from_user or update.message.from_user.id != ADMIN_ID:
         return
     records = sorted(STORE["users"].values(), key=lambda item: item["person_number"])
-    if records:
-        await update.message.reply_text("📋 الأشخاص:\n" + "\n".join(f"{display_name(x)} — ID: {x['user_id']}" for x in records))
-    else:
-        await update.message.reply_text("ما عندك متلقين مسجلين حاليًا.")
+    await update.message.reply_text("📋 الأشخاص:\n" + "\n".join(f"{display_name(x)} — ID: {x['user_id']}" for x in records) if records else "ما عندك متلقين مسجلين حاليًا.")
 
 
 async def respond(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global client
     message = update.message
     if not message or not message.text or not message.from_user:
         return
@@ -265,19 +356,24 @@ async def respond(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if is_type_question(message.text):
         await message.reply_text("انا بوت اقصد بوث 😝")
         return
+
     reply = fallback_reply(message.text)
-    if client:
+    openai_client: Optional[AsyncOpenAI] = context.application.bot_data.get("openai_client")
+    if openai_client:
         history = context.user_data.setdefault("ai_history", [])
         history.append({"role": "user", "content": message.text})
         history[:] = history[-MAX_HISTORY_MESSAGES:]
         try:
-            result = await client.chat.completions.create(model=OPENAI_MODEL, temperature=0.7, max_tokens=600, messages=[{"role": "system", "content": SYSTEM_PROMPT}, *history])
-            reply = (result.choices[0].message.content or "").strip() or reply
+            result = await openai_client.chat.completions.create(
+                model=OPENAI_MODEL, temperature=0.7, max_tokens=600,
+                messages=[{"role": "system", "content": SYSTEM_PROMPT}, *history],
+            )
+            reply = _clean_ai_text(result.choices[0].message.content or "") or reply
             history.append({"role": "assistant", "content": reply})
             history[:] = history[-MAX_HISTORY_MESSAGES:]
         except Exception:
             logger.exception("AI request failed")
-    await message.reply_text(reply)
+    await reply_ai_response(message, reply)
 
 
 async def forward_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -295,10 +391,21 @@ async def set_commands(application: Application) -> None:
     ])
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error("Unhandled Telegram update error", exc_info=context.error)
+
+
 def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("The AISELAMONBOT_TOKEN environment secret is not set")
-    application = Application.builder().token(BOT_TOKEN).post_init(set_commands).build()
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
+    application.add_error_handler(error_handler)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("channel", send_channel_link))
     application.add_handler(CommandHandler("rename", rename))

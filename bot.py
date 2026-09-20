@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("AISELAMONBOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-CHANNEL_URL = "https://t.me/+e0WNT74_myFmZjY0"
+CHANNEL_URL = "https://t.me/+LIVzUK7_TxphNGZk"
 
 SYSTEM_PROMPT = """أنت مساعد تيليجرام سعودي لطيف وخفيف دم.
 

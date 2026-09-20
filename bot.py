@@ -3,21 +3,13 @@ import logging
 import os
 from pathlib import Path
 from typing import Any, Optional
+from uuid import uuid4
 
-from telegram import (
-    BotCommand,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Update,
-)
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
+    Application, CallbackQueryHandler, CommandHandler, ContextTypes,
+    MessageHandler, PreCheckoutQueryHandler, filters,
 )
 
 try:
@@ -25,10 +17,7 @@ try:
 except ImportError:  # pragma: no cover
     AsyncOpenAI = None
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("AISELAMONBOT_TOKEN")
@@ -38,40 +27,31 @@ ADMIN_ID = int(os.getenv("BOT_ADMIN_ID", "8561249287"))
 USER_STORE_FILE = Path(os.getenv("USER_STORE_FILE", "bot_users.json"))
 CHANNEL_URL = "https://t.me/+LIVzUK7_TxphNGZk"
 CONTACT_ADMIN_CALLBACK = "contact_admin"
+SNAPCHAT_CALLBACK = "buy_snapchat"
+SNAPCHAT_USERNAME = "Sela.mon"
+SNAPCHAT_PRICE = 500
+SNAPCHAT_PAYLOAD_PREFIX = "snapchat_500_stars"
 MAX_HISTORY_MESSAGES = 20
 OPENAI_QUOTA_ERROR_CODES = {"insufficient_quota", "credit_balance_exhausted"}
 
 SYSTEM_PROMPT = """أنت مساعد تيليجرام سعودي ذكي ولطيف وخفيف دم.
-
-التزم دائمًا بهذه القواعد:
-- افهم سياق المحادثة السابقة واستفد منه، ولا تبدأ من الصفر في كل رسالة.
-- أجب بدقة وبشكل مفيد، وقدم شرحًا مفصلًا عندما يطلب المستخدم ذلك.
-- استخدم اللهجة السعودية الطبيعية إذا كان المستخدم يتحدث بالعربية، وتحدث بلغة المستخدم.
-- لا تخترع معلومات. إذا لم تكن متأكدًا فاذكر ذلك بوضوح.
-- كن لطيفًا وخفيف دم، واستخدم الإيموجي باعتدال.
-- لا تسأل أسئلة غير ضرورية؛ وإذا كان الطلب واضحًا نفذه مباشرة.
-- إذا سأل المستخدم «وش نوعك؟» أو عن نوعك، أجب حرفيًا: «انا بوت اقصد بوث 😝».
-- لا تستخدم محتوى جنسيًا صريحًا أو يستغل القاصرين أو يتضمن إكراهًا.
-"""
+أجب باللهجة السعودية إذا كان المستخدم يتحدث بالعربية، وكن مفيدًا ولطيفًا.
+إذا سأل المستخدم وش نوعك أو ما نوعك فأجب حرفيًا: انا بوت اقصد بوث 😝.
+لا تستخدم محتوى جنسيًا صريحًا أو يستغل القاصرين أو يتضمن إكراهًا."""
 
 client: Optional[AsyncOpenAI] = None
 if OPENAI_API_KEY and AsyncOpenAI:
     client = AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=45.0, max_retries=2)
-    logger.info("OpenAI enabled with model %s", OPENAI_MODEL)
-elif not OPENAI_API_KEY:
-    logger.warning("OPENAI_API_KEY is not set; using local replies")
-elif not AsyncOpenAI:
-    logger.warning("The openai package is not installed; using local replies")
 
 
 def load_store() -> dict[str, Any]:
-    default = {"next_person": 1, "users": {}, "admin_messages": {}}
+    default = {"next_person": 1, "users": {}, "admin_messages": {}, "payments": []}
     try:
         if USER_STORE_FILE.exists():
-            data = json.loads(USER_STORE_FILE.read_text(encoding="utf-8"))
-            default.update(data)
+            default.update(json.loads(USER_STORE_FILE.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError):
-        logger.exception("Could not load user store; starting with an empty store")
+        logger.exception("Could not load user store")
+    default.setdefault("payments", [])
     return default
 
 
@@ -80,23 +60,21 @@ STORE = load_store()
 
 def save_store() -> None:
     temporary = USER_STORE_FILE.with_suffix(".tmp")
-    temporary.write_text(
-        json.dumps(STORE, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    temporary.write_text(json.dumps(STORE, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(USER_STORE_FILE)
+
+
+def display_name(record: dict[str, Any]) -> str:
+    return record.get("name") or f"شخص {record['person_number']}"
 
 
 def user_record(user_id: int, user: Any) -> dict[str, Any]:
     key = str(user_id)
     record = STORE["users"].get(key)
     if not record:
-        person_number = int(STORE["next_person"])
-        STORE["next_person"] = person_number + 1
-        record = {
-            "person_number": person_number,
-            "name": f"شخص {person_number}",
-            "user_id": user_id,
-        }
+        number = int(STORE["next_person"])
+        STORE["next_person"] = number + 1
+        record = {"person_number": number, "name": f"شخص {number}", "user_id": user_id}
         STORE["users"][key] = record
     record["username"] = user.username or ""
     record["first_name"] = user.first_name or ""
@@ -104,35 +82,17 @@ def user_record(user_id: int, user: Any) -> dict[str, Any]:
     return record
 
 
-def display_name(record: dict[str, Any]) -> str:
-    return record.get("name") or f"شخص {record['person_number']}"
-
-
-def channel_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("📣 انضم الآن إلى القناة", url=CHANNEL_URL)],
-            [InlineKeyboardButton("✉️ إرسال رسالة لصاحب البوت", callback_data=CONTACT_ADMIN_CALLBACK)],
-        ]
-    )
-
-
-def is_channel_link_request(text: str) -> bool:
-    normalized = text.strip().lower()
-    link_words = ("رابط", "لينك", "link", "url", "join", "انضم", "دخول")
-    channel_words = ("القناة", "قناه", "قناة", "channel")
-    return CHANNEL_URL.lower() in normalized or (
-        any(word in normalized for word in link_words)
-        and any(word in normalized for word in channel_words)
-    )
+def main_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📣 انضم الآن إلى القناة", url=CHANNEL_URL)],
+        [InlineKeyboardButton("👻 Snapchat — شراء بـ 500 ⭐", callback_data=SNAPCHAT_CALLBACK)],
+        [InlineKeyboardButton("✉️ إرسال رسالة لصاحب البوت", callback_data=CONTACT_ADMIN_CALLBACK)],
+    ])
 
 
 def is_type_question(text: str) -> bool:
     normalized = " ".join(text.strip().lower().split())
-    return any(
-        phrase in normalized
-        for phrase in ("وش نوعك", "وش نوعك؟", "وش انت", "وش أنت", "ما نوعك", "ايش نوعك", "إيش نوعك")
-    )
+    return any(p in normalized for p in ("وش نوعك", "وش انت", "وش أنت", "ما نوعك", "ايش نوعك", "إيش نوعك"))
 
 
 def fallback_reply(text: str) -> str:
@@ -145,77 +105,103 @@ def fallback_reply(text: str) -> str:
         return "العفو يا بعدي 🥹"
     if "كيفك" in lowered or "شلونك" in lowered:
         return "بخير دامك بخير 🔥"
-    return "أبشر يا بعدي 🧡 أقدر أساعدك بالردود البسيطة حاليًا، اكتب طلبك بشكل مختصر وبحاول أفيدك."
-
-
-def openai_error_code(error: Exception) -> Optional[str]:
-    """Return an OpenAI error code from both old and new SDK error shapes."""
-    code = getattr(error, "code", None)
-    if isinstance(code, str):
-        return code
-    body = getattr(error, "body", None)
-    if isinstance(body, dict):
-        error_body = body.get("error")
-        if isinstance(error_body, dict) and isinstance(error_body.get("code"), str):
-            return error_body["code"]
-    return None
-
-
-async def send_channel_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message:
-        await update.message.reply_text(
-            "حياك الله بالقناة 🧡\nاضغط الزر للدخول مباشرة:",
-            reply_markup=channel_keyboard(),
-        )
+    return "أبشر يا بعدي 🧡 اكتب طلبك وبحاول أفيدك."
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message:
         context.user_data["ai_history"] = []
-        await update.message.reply_text(
-            "نوت ⭐️🧡",
-            reply_markup=channel_keyboard(),
-        )
+        await update.message.reply_text("نوت ⭐️🧡\n\nاختر من الأزرار:", reply_markup=main_keyboard())
+
+
+async def send_channel_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message:
+        await update.message.reply_text("حياك الله بالقناة 🧡\nاضغط الزر للدخول:", reply_markup=main_keyboard())
 
 
 async def contact_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    if not query or not query.from_user:
+    if not query or not query.message:
         return
     await query.answer()
     context.user_data["awaiting_admin_message"] = True
     await query.message.reply_text("اكتب رسالتك الحين، وبوصلها لصاحب البوت ويرد عليك 🧡")
 
 
-async def deliver_to_admin(update: Update) -> bool:
+async def create_snapchat_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.message or not query.from_user:
+        return
+    await query.answer()
+    payload = f"{SNAPCHAT_PAYLOAD_PREFIX}:{query.from_user.id}:{uuid4().hex}"
+    try:
+        await query.message.reply_invoice(
+            title="Snapchat 👻",
+            description="احصل على حساب Snapchat بعد إتمام دفع 500 نجمة.",
+            payload=payload,
+            currency="XTR",
+            prices=[LabeledPrice("Snapchat Sela.mon", SNAPCHAT_PRICE)],
+            provider_token="",
+            start_parameter="snapchat-sela-mon",
+        )
+    except Exception:
+        logger.exception("Could not create Stars invoice")
+        await query.message.reply_text("تعذر فتح الدفع الآن. تأكد أن البوت محدث ومفعل على Telegram Stars.")
+
+
+async def precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.pre_checkout_query
+    if not query:
+        return
+    valid = (query.currency == "XTR" and query.total_amount == SNAPCHAT_PRICE and
+             query.invoice_payload.startswith(SNAPCHAT_PAYLOAD_PREFIX + ":"))
+    if valid:
+        await query.answer(ok=True)
+    else:
+        await query.answer(ok=False, error_message="بيانات الدفع غير صحيحة، حاول مرة أخرى.")
+
+
+async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    payment = message.successful_payment if message else None
+    if not message or not payment or not message.from_user:
+        return
+    if payment.currency != "XTR" or payment.total_amount != SNAPCHAT_PRICE:
+        return
+    record = {
+        "product": "snapchat", "user_id": message.from_user.id,
+        "username": message.from_user.username or "", "amount": payment.total_amount,
+        "currency": payment.currency,
+        "telegram_payment_charge_id": payment.telegram_payment_charge_id,
+    }
+    STORE["payments"].append(record)
+    save_store()
+    await message.reply_text(f"تم الدفع بنجاح ✅\n\nحساب Snapchat الخاص بك هو:\n{SNAPCHAT_USERNAME} 👻")
+    try:
+        await message.get_bot().send_message(
+            chat_id=ADMIN_ID,
+            text=f"💰 عملية شراء Snapchat\nالمستخدم: {message.from_user.id}\nالمبلغ: 500 نجمة\nCharge ID: {payment.telegram_payment_charge_id}",
+        )
+    except Exception:
+        logger.exception("Could not notify admin")
+
+
+async def deliver_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     message = update.message
     if not message or not message.from_user or message.from_user.id == ADMIN_ID:
         return False
     record = user_record(message.from_user.id, message.from_user)
+    username = f"\n👤 username: @{message.from_user.username}" if message.from_user.username else ""
     header = await message.get_bot().send_message(
         chat_id=ADMIN_ID,
-        text=(
-            f"📩 رسالة جديدة من {display_name(record)}\n"
-            f"🆔 ID: {message.from_user.id}\n"
-            f"👤 username: @{message.from_user.username}"
-            if message.from_user.username
-            else f"📩 رسالة جديدة من {display_name(record)}\n🆔 ID: {message.from_user.id}"
-        ),
+        text=f"📩 رسالة جديدة من {display_name(record)}\n🆔 ID: {message.from_user.id}{username}",
     )
     STORE["admin_messages"][str(header.message_id)] = message.from_user.id
     try:
-        copied = await message.copy(
-            chat_id=ADMIN_ID,
-            reply_to_message_id=header.message_id,
-        )
+        copied = await message.copy(chat_id=ADMIN_ID, reply_to_message_id=header.message_id)
         STORE["admin_messages"][str(copied.message_id)] = message.from_user.id
     except Exception:
-        logger.exception("Could not copy user message to admin")
-        await message.get_bot().send_message(
-            chat_id=ADMIN_ID,
-            text="تعذر نسخ نوع هذه الرسالة تلقائيًا؛ تواصل مع المستخدم عبر الـ ID أعلاه.",
-            reply_to_message_id=header.message_id,
-        )
+        logger.exception("Could not copy user message")
     save_store()
     await message.reply_text("وصلت رسالتك لصاحب البوت ✅ إذا رد، يوصلك الرد هنا.")
     return True
@@ -226,16 +212,13 @@ async def admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> boo
     if not message or not message.from_user or message.from_user.id != ADMIN_ID:
         return False
     replied = message.reply_to_message
-    if not replied:
-        return False
-    recipient_id = STORE["admin_messages"].get(str(replied.message_id))
+    recipient_id = STORE["admin_messages"].get(str(replied.message_id)) if replied else None
     if not recipient_id:
         return False
     try:
         await message.copy(chat_id=int(recipient_id))
         await message.reply_text("تم إرسال الرد ✅")
     except Exception:
-        logger.exception("Could not send admin reply")
         await message.reply_text("ما قدرت أرسل الرد؛ يمكن المستخدم حظر البوت.")
     return True
 
@@ -247,12 +230,8 @@ async def rename(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("الاستخدام: /rename <رقم الشخص أو ID> <الاسم الجديد>")
         return
     identifier, new_name = context.args[0], " ".join(context.args[1:]).strip()
-    record = None
-    for candidate in STORE["users"].values():
-        if str(candidate.get("person_number")) == identifier or str(candidate.get("user_id")) == identifier:
-            record = candidate
-            break
-    if not record or not new_name:
+    record = next((item for item in STORE["users"].values() if str(item.get("person_number")) == identifier or str(item.get("user_id")) == identifier), None)
+    if not record:
         await update.message.reply_text("ما لقيت هذا الشخص. استخدم /people لمعرفة الأرقام.")
         return
     record["name"] = new_name[:64]
@@ -264,84 +243,53 @@ async def people(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.from_user or update.message.from_user.id != ADMIN_ID:
         return
     records = sorted(STORE["users"].values(), key=lambda item: item["person_number"])
-    if not records:
-        await update.message.reply_text("ما عندك متلقين مسجلين حتى الآن.")
-        return
-    lines = [f"{display_name(item)} — ID: {item['user_id']}" for item in records]
-    await update.message.reply_text("📋 الأشخاص:\n" + "\n".join(lines))
+    await update.message.reply_text("📋 الأشخاص:\n" + "\n".join(f"{display_name(x)} — ID: {x['user_id']}" for x in records) if records else "ما عندك متلقين مسجلين حتى الآن.")
 
 
 async def respond(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global client
-
     message = update.message
     if not message or not message.text or not message.from_user:
         return
     if await admin_reply(update, context):
         return
-    if context.user_data.pop("awaiting_admin_message", False):
-        if await deliver_to_admin(update):
-            return
-    text = message.text.strip()
+    if context.user_data.pop("awaiting_admin_message", False) and await deliver_to_admin(update, context):
+        return
     await message.chat.send_action(ChatAction.TYPING)
-    if is_channel_link_request(text):
+    if any(word in message.text.lower() for word in ("رابط القناة", "لينك القناة", "رابط قناة", "channel link")):
         await send_channel_link(update, context)
         return
-    if is_type_question(text):
+    if is_type_question(message.text):
         await message.reply_text("انا بوت اقصد بوث 😝")
         return
-    if not client:
-        reply = fallback_reply(text)
-    else:
+    reply = fallback_reply(message.text)
+    if client:
         history = context.user_data.setdefault("ai_history", [])
-        history.append({"role": "user", "content": text})
+        history.append({"role": "user", "content": message.text})
         history[:] = history[-MAX_HISTORY_MESSAGES:]
         try:
-            completion = await client.chat.completions.create(
-                model=OPENAI_MODEL,
-                temperature=0.7,
-                max_tokens=600,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    *history,
-                ],
-            )
-            reply = (completion.choices[0].message.content or "").strip()
-            if not reply:
-                raise RuntimeError("OpenAI returned an empty response")
+            result = await client.chat.completions.create(model=OPENAI_MODEL, temperature=0.7, max_tokens=600, messages=[{"role": "system", "content": SYSTEM_PROMPT}, *history])
+            reply = (result.choices[0].message.content or "").strip() or reply
             history.append({"role": "assistant", "content": reply})
             history[:] = history[-MAX_HISTORY_MESSAGES:]
-        except Exception as error:
-            error_code = openai_error_code(error)
-            if error_code in OPENAI_QUOTA_ERROR_CODES:
-                client = None
-                logger.warning(
-                    "OpenAI quota exhausted (%s); switching to local replies",
-                    error_code,
-                )
-            else:
-                logger.exception("AI request failed for model %s", OPENAI_MODEL)
-            reply = fallback_reply(text)
+        except Exception:
+            logger.exception("AI request failed")
     await message.reply_text(reply)
 
 
 async def forward_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.user_data.get("awaiting_admin_message"):
         context.user_data.pop("awaiting_admin_message", None)
-        await deliver_to_admin(update)
-        return
-    await admin_reply(update, context)
+        await deliver_to_admin(update, context)
+    else:
+        await admin_reply(update, context)
 
 
 async def set_commands(application: Application) -> None:
-    await application.bot.set_my_commands(
-        [
-            BotCommand("start", "بدء البوت"),
-            BotCommand("channel", "رابط القناة"),
-            BotCommand("rename", "تغيير اسم شخص - للمالك فقط"),
-            BotCommand("people", "عرض الأشخاص - للمالك فقط"),
-        ]
-    )
+    await application.bot.set_my_commands([
+        BotCommand("start", "بدء البوت"), BotCommand("channel", "رابط القناة"),
+        BotCommand("rename", "تغيير اسم شخص - للمالك فقط"), BotCommand("people", "عرض الأشخاص - للمالك فقط"),
+    ])
 
 
 def main() -> None:
@@ -353,10 +301,10 @@ def main() -> None:
     application.add_handler(CommandHandler("rename", rename))
     application.add_handler(CommandHandler("people", people))
     application.add_handler(CallbackQueryHandler(contact_admin, pattern=f"^{CONTACT_ADMIN_CALLBACK}$"))
-    application.add_handler(
-        MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.TEXT, forward_any_message),
-        group=0,
-    )
+    application.add_handler(CallbackQueryHandler(create_snapchat_invoice, pattern=f"^{SNAPCHAT_CALLBACK}$"))
+    application.add_handler(PreCheckoutQueryHandler(precheckout))
+    application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
+    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.TEXT, forward_any_message), group=0)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, respond), group=1)
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 

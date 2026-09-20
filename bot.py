@@ -1,0 +1,98 @@
+import logging
+import os
+from typing import Optional
+
+from telegram import Update
+from telegram.constants import ChatAction
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+
+try:
+    from openai import AsyncOpenAI
+except ImportError:  # pragma: no cover
+    AsyncOpenAI = None
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
+BOT_TOKEN = os.getenv("AISELAMONBOT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+SYSTEM_PROMPT = """أنت مساعد تيليجرام سعودي لطيف وخفيف دم.
+
+التزم دائمًا بهذه القواعد:
+- أجب مباشرة ولا تسأل المستخدم أي سؤال.
+- اجعل الرد قصيرًا وعلى قد السؤال، غالبًا جملة أو جملتين فقط.
+- لا تكتب مقدمات أو شرحًا طويلًا ولا تكرر كلام المستخدم.
+- استخدم اللهجة السعودية الطبيعية بدون مبالغة.
+- أضف أحيانًا إيموجي لطيفًا مثل 🥹 🧡 🔥 😂، ولا تكثر منها.
+- كن كوميديًا ولطيفًا، ويمكنك استخدام إيحاء خفيف ومرح غير فاضح وغير جنسي صريح.
+- لا تستخدم محتوى جنسيًا صريحًا أو يستغل القاصرين أو يتضمن إكراهًا.
+- لا تختم بسؤال مثل: هل تحتاج شيئًا آخر؟
+- إذا كان الطلب غير واضح، أعطِ أفضل جواب مفيد بدل طرح سؤال.
+"""
+
+client: Optional[object] = None
+if OPENAI_API_KEY and AsyncOpenAI:
+    client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+
+def fallback_reply(text: str) -> str:
+    """A small local response so the bot still works without an AI provider key."""
+    lowered = text.strip().lower()
+    if any(word in lowered for word in ("هلا", "مرحبا", "السلام", "hello")):
+        return "يا هلا والله 🧡 نورت!"
+    if "شكرا" in lowered or "مشكور" in lowered:
+        return "العفو يا بعدي 🥹"
+    if "كيفك" in lowered or "شلونك" in lowered:
+        return "بخير دامك بخير 🔥"
+    return "تم يا بعدي، بس فعّل مفتاح الذكاء الاصطناعي عشان أعطيك رد أذكى 🧡"
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("يا هلا! اكتب اللي تبيه وأنا أجاوبك على السريع 🥹🧡")
+
+
+async def respond(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.text:
+        return
+
+    text = update.message.text.strip()
+    await update.message.chat.send_action(ChatAction.TYPING)
+
+    if not client:
+        reply = fallback_reply(text)
+    else:
+        try:
+            completion = await client.chat.completions.create(
+                model=OPENAI_MODEL,
+                temperature=0.85,
+                max_tokens=120,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": text},
+                ],
+            )
+            reply = (completion.choices[0].message.content or "تم يا بعدي 🧡").strip()
+        except Exception:
+            logger.exception("AI request failed")
+            reply = "صار تعليق بسيط، جرّب مرة ثانية يا بعدي 🥹"
+
+    await update.message.reply_text(reply)
+
+
+def main() -> None:
+    if not BOT_TOKEN:
+        raise RuntimeError("The AISELAMONBOT_TOKEN environment secret is not set")
+
+    application = Application.builder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, respond))
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()

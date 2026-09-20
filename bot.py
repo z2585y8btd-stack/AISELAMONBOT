@@ -1,4 +1,3 @@
-import asyncio
 import html
 import json
 import logging
@@ -114,6 +113,11 @@ async def reply_ai_response(message: Message, text: str) -> None:
 
 
 async def post_init(application: Application) -> None:
+    # Keep all startup I/O inside python-telegram-bot's managed event loop.
+    # Calling asyncio.run() before run_polling() closes the loop on Python 3.11,
+    # so Application.run_polling() otherwise finds no current event loop.
+    await application.bot.get_me()
+    await application.bot.delete_webhook(drop_pending_updates=True)
     if OPENAI_API_KEY and AsyncOpenAI:
         application.bot_data["openai_client"] = AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=45.0, max_retries=2)
 
@@ -370,12 +374,6 @@ def main() -> None:
         raise RuntimeError("The AISELAMONBOT_TOKEN environment secret is not set")
 
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
-
-    async def _startup() -> None:
-        await application.bot.get_me()
-        await application.bot.delete_webhook(drop_pending_updates=True)
-
-    asyncio.run(_startup())
 
     application.add_error_handler(error_handler)
     application.add_handler(CommandHandler("start", start))

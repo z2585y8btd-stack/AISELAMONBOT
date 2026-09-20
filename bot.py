@@ -55,7 +55,8 @@ SYSTEM_PROMPT = """أنت مساعد تيليجرام سعودي لطيف وخف
 
 client: Optional[AsyncOpenAI] = None
 if OPENAI_API_KEY and AsyncOpenAI:
-    client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    # مهلة قصيرة وإعادة محاولة تلقائية تمنع بقاء البوت معل��قًا عند تعطل الشبكة أو الخدمة.
+    client = AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=20.0, max_retries=2)
     logger.info("OpenAI enabled with model %s", OPENAI_MODEL)
 elif not OPENAI_API_KEY:
     logger.warning("OPENAI_API_KEY is not set; using fallback replies")
@@ -134,7 +135,7 @@ def fallback_reply(text: str) -> str:
         return "العفو يا بعدي 🥹"
     if "كيفك" in lowered or "شلونك" in lowered:
         return "بخير دامك بخير 🔥"
-    return "تم يا بعدي، بس فعّل مفتاح الذكاء الاصطناعي عشان أعطيك رد أذكى 🧡"
+    return "وصلت رسالتك يا بعدي 🧡 الذكاء الاصطناعي تأخر شوي، لكن البوت شغال. جرّب ترسلها مرة ثانية بعد لحظة."
 
 
 async def send_channel_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -148,7 +149,7 @@ async def send_channel_link(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message:
         await update.message.reply_text(
-            "يا هلا! نورت يا بعدي 🥹🧡\n\nتقدر تدخل القناة أو ترسل رسالة مباشرة لصاحب البوت:",
+            "يا هلا! نورت ي�� بعدي 🥹🧡\n\nتقدر تدخل القناة أو ترسل رسالة مباشرة لصاحب البوت:",
             reply_markup=channel_keyboard(),
         )
 
@@ -211,7 +212,7 @@ async def admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> boo
         await message.reply_text("تم إرسال الرد ✅")
     except Exception:
         logger.exception("Could not send admin reply")
-        await message.reply_text("ما قدرت ��رسل الرد؛ يمكن المستخدم حظر البوت.")
+        await message.reply_text("ما قدرت أرسل الرد؛ يمكن المستخدم حظر البوت.")
     return True
 
 
@@ -273,10 +274,14 @@ async def respond(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     {"role": "user", "content": text},
                 ],
             )
-            reply = (completion.choices[0].message.content or "تم يا بعدي 🧡").strip()
+            reply = (completion.choices[0].message.content or "").strip()
+            if not reply:
+                logger.warning("OpenAI returned an empty response")
+                reply = fallback_reply(text)
         except Exception:
-            logger.exception("AI request failed")
-            reply = "صار تعليق بسيط، جرّب مرة ثانية يا بعدي 🥹"
+            # لا نترك المستخدم برسالة خطأ بسبب تعطل مؤقت أو انتهاء مهلة OpenAI.
+            logger.exception("AI request failed for model %s", OPENAI_MODEL)
+            reply = fallback_reply(text)
     await message.reply_text(reply)
 
 

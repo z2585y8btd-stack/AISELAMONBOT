@@ -2,7 +2,7 @@ import logging
 import os
 from typing import Optional
 
-from telegram import Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("AISELAMONBOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+CHANNEL_URL = "https://t.me/+e0WNT74_myFmZjY0"
 
 SYSTEM_PROMPT = """أنت مساعد تيليجرام سعودي لطيف وخفيف دم.
 
@@ -40,6 +41,22 @@ if OPENAI_API_KEY and AsyncOpenAI:
     client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 
+def channel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("📣 دخول القناة لمدة 30 يوم", url=CHANNEL_URL)]]
+    )
+
+
+def is_channel_link_request(text: str) -> bool:
+    normalized = text.strip().lower()
+    link_words = ("رابط", "لينك", "link", "url", "join", "انضم", "دخول")
+    channel_words = ("القناة", "قناه", "قناة", "channel")
+    return (
+        CHANNEL_URL.lower() in normalized
+        or (any(word in normalized for word in link_words) and any(word in normalized for word in channel_words))
+    )
+
+
 def fallback_reply(text: str) -> str:
     """A small local response so the bot still works without an AI provider key."""
     lowered = text.strip().lower()
@@ -52,8 +69,31 @@ def fallback_reply(text: str) -> str:
     return "تم يا بعدي، بس فعّل مفتاح الذكاء الاصطناعي عشان أعطيك رد أذكى 🧡"
 
 
+async def send_channel_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    await update.message.reply_text(
+        "حياك الله بالقناة 🧡\nاضغط الزر للدخول، والاشتراك متاح لمدة 30 يوم:",
+        reply_markup=channel_keyboard(),
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("يا هلا! اكتب اللي تبيه وأنا أجاوبك على السريع 🥹🧡")
+    if not update.message:
+        return
+    await update.message.reply_text(
+        "يا هلا! نورت يا بعدي 🥹🧡\n\nتقدر تدخل قناتنا لمدة 30 يوم من الزر تحت:",
+        reply_markup=channel_keyboard(),
+    )
+
+
+async def set_commands(application: Application) -> None:
+    await application.bot.set_my_commands(
+        [
+            BotCommand("start", "بدء البوت والدخول للقناة"),
+            BotCommand("channel", "رابط القناة لمدة 30 يوم"),
+        ]
+    )
 
 
 async def respond(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -62,6 +102,10 @@ async def respond(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     text = update.message.text.strip()
     await update.message.chat.send_action(ChatAction.TYPING)
+
+    if is_channel_link_request(text):
+        await send_channel_link(update, context)
+        return
 
     if not client:
         reply = fallback_reply(text)
@@ -88,8 +132,14 @@ def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("The AISELAMONBOT_TOKEN environment secret is not set")
 
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(set_commands)
+        .build()
+    )
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("channel", send_channel_link))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, respond))
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 

@@ -39,6 +39,7 @@ USER_STORE_FILE = Path(os.getenv("USER_STORE_FILE", "bot_users.json"))
 CHANNEL_URL = "https://t.me/+LIVzUK7_TxphNGZk"
 CONTACT_ADMIN_CALLBACK = "contact_admin"
 MAX_HISTORY_MESSAGES = 20
+OPENAI_QUOTA_ERROR_CODES = {"insufficient_quota", "credit_balance_exhausted"}
 
 SYSTEM_PROMPT = """أنت مساعد تيليجرام سعودي ذكي ولطيف وخفيف دم.
 
@@ -57,9 +58,9 @@ if OPENAI_API_KEY and AsyncOpenAI:
     client = AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=45.0, max_retries=2)
     logger.info("OpenAI enabled with model %s", OPENAI_MODEL)
 elif not OPENAI_API_KEY:
-    logger.error("OPENAI_API_KEY is not set; AI replies are disabled")
+    logger.warning("OPENAI_API_KEY is not set; using local replies")
 elif not AsyncOpenAI:
-    logger.error("The openai package is not installed; AI replies are disabled")
+    logger.warning("The openai package is not installed; using local replies")
 
 
 def load_store() -> dict[str, Any]:
@@ -133,7 +134,20 @@ def fallback_reply(text: str) -> str:
         return "العفو يا بعدي 🥹"
     if "كيفك" in lowered or "شلونك" in lowered:
         return "بخير دامك بخير 🔥"
-    return "حاليًا ما قدرت أتصل بخدمة الذكاء الاصطناعي. تأكد من OPENAI_API_KEY وحاول بعد لحظة."
+    return "أبشر يا بعدي 🧡 أقدر أساعدك بالردود البسيطة حاليًا، اكتب طلبك بشكل مختصر وبحاول أفيدك."
+
+
+def openai_error_code(error: Exception) -> Optional[str]:
+    """Return an OpenAI error code from both old and new SDK error shapes."""
+    code = getattr(error, "code", None)
+    if isinstance(code, str):
+        return code
+    body = getattr(error, "body", None)
+    if isinstance(body, dict):
+        error_body = body.get("error")
+        if isinstance(error_body, dict) and isinstance(error_body.get("code"), str):
+            return error_body["code"]
+    return None
 
 
 async def send_channel_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -247,6 +261,8 @@ async def people(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def respond(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global client
+
     message = update.message
     if not message or not message.text or not message.from_user:
         return
@@ -281,8 +297,18 @@ async def respond(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 raise RuntimeError("OpenAI returned an empty response")
             history.append({"role": "assistant", "content": reply})
             history[:] = history[-MAX_HISTORY_MESSAGES:]
-        except Exception:
-            logger.exception("AI request failed for model %s", OPENAI_MODEL)
+        except Exception as error:
+            error_code = openai_error_code(error)
+            if error_code in OPENAI_QUOTA_ERROR_CODES:
+                # Quota will not recover during this process, so avoid repeatedly
+                # calling OpenAI and use local replies until the bot restarts.
+                client = None
+                logger.warning(
+                    "OpenAI quota exhausted (%s); switching to local replies",
+                    error_code,
+                )
+            else:
+                logger.exception("AI request failed for model %s", OPENAI_MODEL)
             reply = fallback_reply(text)
     await message.reply_text(reply)
 
@@ -309,10 +335,6 @@ async def set_commands(application: Application) -> None:
 def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("The AISELAMONBOT_TOKEN environment secret is not set")
-    if not OPENAI_API_KEY:
-        raise RuntimeError("The OPENAI_API_KEY environment secret is required for AI mode")
-    if not AsyncOpenAI:
-        raise RuntimeError("The openai package is required for AI mode")
     application = Application.builder().token(BOT_TOKEN).post_init(set_commands).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("channel", send_channel_link))

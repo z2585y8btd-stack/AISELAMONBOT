@@ -31,7 +31,7 @@ SYSTEM_PROMPT = """أنت مساعد تيليجرام سعودي لطيف وخف
 - استخدم اللهجة السعودية الطبيعية بدون مبالغة.
 - أضف أحيانًا إيموجي لطيفًا مثل 🥹 🧡 🔥 😂، ولا تكثر منها.
 - كن كوميديًا ولطيفًا، ويمكنك استخدام إيحاء خفيف ومرح غير فاضح وغير جنسي صريح.
-- لا تستخدم محتوى جنسيًا صريحًا أو يستغل القاصرين أو يتضمن إكراهًا.
+- لا تستخدم محتوى جنسيًا صريحًا أو يستغل القاصنين أو يتضمن إكراهًا.
 - لا تختم بسؤال مثل: هل تحتاج شيئًا آخر؟
 - إذا كان الطلب غير واضح، أعطِ أفضل جواب مفيد بدل طرح سؤال.
 """
@@ -43,7 +43,7 @@ if OPENAI_API_KEY and AsyncOpenAI:
 
 def channel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📣 دخول القناة لمدة 30 يوم", url=CHANNEL_URL)]]
+        [[InlineKeyboardButton("📣 انضم الآن إلى القناة", url=CHANNEL_URL)]]
     )
 
 
@@ -73,7 +73,7 @@ async def send_channel_link(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not update.message:
         return
     await update.message.reply_text(
-        "حياك الله بالقناة 🧡\nاضغط الزر للدخول، والاشتراك متاح لمدة 30 يوم:",
+        "حياك الله بالقناة 🧡\nاضغط الزر للدخول مباشرة:",
         reply_markup=channel_keyboard(),
     )
 
@@ -82,7 +82,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
     await update.message.reply_text(
-        "يا هلا! نورت يا بعدي 🥹🧡\n\nتقدر تدخل قناتنا لمدة 30 يوم من الزر تحت:",
+        "يا هلا! نورت يا بعدي 🥹🧡\n\nتقدر تدخل القناة من الزر تحت:",
         reply_markup=channel_keyboard(),
     )
 

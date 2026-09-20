@@ -29,10 +29,16 @@ except ImportError:  # pragma: no cover
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.getenv("AISELAMONBOT_TOKEN")
+BOT_TOKEN = (os.getenv("AISELAMONBOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-ADMIN_ID = int(os.getenv("BOT_ADMIN_ID", "8561249287"))
+
+try:
+    ADMIN_ID = int(os.getenv("BOT_ADMIN_ID", "8561249287"))
+except ValueError:
+    logger.warning("BOT_ADMIN_ID is invalid; falling back to default admin id.")
+    ADMIN_ID = 8561249287
+
 USER_STORE_FILE = Path(os.getenv("USER_STORE_FILE", "bot_users.json"))
 CHANNEL_URL = "https://t.me/+LIVzUK7_TxphNGZk"
 CONTACT_ADMIN_CALLBACK = "contact_admin"
@@ -113,11 +119,12 @@ async def reply_ai_response(message: Message, text: str) -> None:
 
 
 async def post_init(application: Application) -> None:
-    # Keep all startup I/O inside python-telegram-bot's managed event loop.
-    # Calling asyncio.run() before run_polling() closes the loop on Python 3.11,
-    # so Application.run_polling() otherwise finds no current event loop.
-    await application.bot.get_me()
-    await application.bot.delete_webhook(drop_pending_updates=True)
+    try:
+        await application.bot.get_me()
+        await application.bot.delete_webhook(drop_pending_updates=True)
+    except TelegramError:
+        logger.exception("Failed to initialize Telegram bot webhook state")
+
     if OPENAI_API_KEY and AsyncOpenAI:
         application.bot_data["openai_client"] = AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=45.0, max_retries=2)
 
@@ -135,7 +142,9 @@ def load_store() -> dict[str, Any]:
     default = {"next_person": 1, "users": {}, "admin_messages": {}, "payments": []}
     try:
         if USER_STORE_FILE.exists():
-            default.update(json.loads(USER_STORE_FILE.read_text(encoding="utf-8")))
+            existing = json.loads(USER_STORE_FILE.read_text(encoding="utf-8"))
+            if isinstance(existing, dict):
+                default.update(existing)
     except (OSError, json.JSONDecodeError):
         logger.exception("Could not load user store")
     default.setdefault("payments", [])
@@ -146,9 +155,12 @@ STORE = load_store()
 
 
 def save_store() -> None:
-    temporary = USER_STORE_FILE.with_suffix(".tmp")
-    temporary.write_text(json.dumps(STORE, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(USER_STORE_FILE)
+    try:
+        temporary = USER_STORE_FILE.with_suffix(".tmp")
+        temporary.write_text(json.dumps(STORE, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(USER_STORE_FILE)
+    except OSError:
+        logger.exception("Could not save user store")
 
 
 def display_name(record: dict[str, Any]) -> str:
@@ -192,7 +204,7 @@ def fallback_reply(text: str) -> str:
         return "العفو يا بعدي 🥹"
     if "كيفك" in lowered or "شلونك" in lowered:
         return "بخير دامك بخير 🔥"
-    return "أبشر يا بعدي 🧡 اكتب طلبك وبحاول أفيدك."
+    return "أبشر يا ��عدي 🧡 اكتب طلبك وبحاول أفيدك."
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -335,25 +347,35 @@ async def respond(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.user_data.pop("awaiting_admin_message", False) and await deliver_to_admin(update, context):
         return
     await message.chat.send_action(ChatAction.TYPING)
+
     if any(word in message.text.lower() for word in ("رابط القناة", "لينك القناة", "رابط قناة", "channel link")):
         await send_channel_link(update, context)
         return
+
     if is_type_question(message.text):
         await message.reply_text("انا بوت اقصد بوث 😝")
         return
+
     reply = fallback_reply(message.text)
     openai_client: Optional[AsyncOpenAI] = context.application.bot_data.get("openai_client")
+
     if openai_client:
         history = context.user_data.setdefault("ai_history", [])
         history.append({"role": "user", "content": message.text})
         history[:] = history[-MAX_HISTORY_MESSAGES:]
         try:
-            result = await openai_client.chat.completions.create(model=OPENAI_MODEL, temperature=0.7, max_tokens=600, messages=[{"role": "system", "content": SYSTEM_PROMPT}, *history])
+            result = await openai_client.chat.completions.create(
+                model=OPENAI_MODEL,
+                temperature=0.7,
+                max_tokens=600,
+                messages=[{"role": "system", "content": SYSTEM_PROMPT}, *history],
+            )
             reply = _clean_ai_text(result.choices[0].message.content or "") or reply
             history.append({"role": "assistant", "content": reply})
             history[:] = history[-MAX_HISTORY_MESSAGES:]
         except Exception:
             logger.exception("AI request failed")
+
     await reply_ai_response(message, reply)
 
 
@@ -374,7 +396,6 @@ def main() -> None:
         raise RuntimeError("The AISELAMONBOT_TOKEN environment secret is not set")
 
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
-
     application.add_error_handler(error_handler)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("channel", send_channel_link))
@@ -386,7 +407,8 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.TEXT, forward_any_message), group=0)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, respond), group=1)
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":

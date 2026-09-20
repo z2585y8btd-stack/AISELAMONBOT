@@ -136,11 +136,11 @@ async def create_snapchat_invoice(update: Update, context: ContextTypes.DEFAULT_
     payload = f"{SNAPCHAT_PAYLOAD_PREFIX}:{query.from_user.id}:{uuid4().hex}"
     try:
         await query.message.reply_invoice(
-            title="Snapchat 👻",
-            description="احصل على حساب Snapchat بعد إتمام دفع 500 نجمة.",
+            title="Snapchat account",
+            description="Snapchat account — 500 ⭐️",
             payload=payload,
             currency="XTR",
-            prices=[LabeledPrice("Snapchat Sela.mon", SNAPCHAT_PRICE)],
+            prices=[LabeledPrice("Snapchat account", SNAPCHAT_PRICE)],
             provider_token="",
             start_parameter="snapchat-sela-mon",
         )
@@ -243,7 +243,10 @@ async def people(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.from_user or update.message.from_user.id != ADMIN_ID:
         return
     records = sorted(STORE["users"].values(), key=lambda item: item["person_number"])
-    await update.message.reply_text("📋 الأشخاص:\n" + "\n".join(f"{display_name(x)} — ID: {x['user_id']}" for x in records) if records else "ما عندك متلقين مسجلين حتى الآن.")
+    if records:
+        await update.message.reply_text("📋 الأشخاص:\n" + "\n".join(f"{display_name(x)} — ID: {x['user_id']}" for x in records))
+    else:
+        await update.message.reply_text("ما عندك متلقين مسجلين حاليًا.")
 
 
 async def respond(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -288,7 +291,7 @@ async def forward_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def set_commands(application: Application) -> None:
     await application.bot.set_my_commands([
         BotCommand("start", "بدء البوت"), BotCommand("channel", "رابط القناة"),
-        BotCommand("rename", "تغيير اسم شخص - للمالك فقط"), BotCommand("people", "عرض الأشخاص - للمالك فقط"),
+        BotCommand("rename", "تغيير اسم شخص - للمالك فقط"), BotCommand("people", "ع��ض الأشخاص - للمالك فقط"),
     ])
 
 

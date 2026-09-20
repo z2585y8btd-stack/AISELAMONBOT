@@ -111,7 +111,7 @@ def fallback_reply(text: str) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message:
         context.user_data["ai_history"] = []
-        await update.message.reply_text("نوت ⭐️🧡\n\nاختر من الأزرار:", reply_markup=main_keyboard())
+        await update.message.reply_text("نورت 🧡", reply_markup=main_keyboard())
 
 
 async def send_channel_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -137,7 +137,7 @@ async def create_snapchat_invoice(update: Update, context: ContextTypes.DEFAULT_
     try:
         await query.message.reply_invoice(
             title="Snapchat account",
-            description="Snapchat account — 100 ��️",
+            description="Snapchat account — 100 ⭐️",
             payload=payload,
             currency="XTR",
             prices=[LabeledPrice("Snapchat account", SNAPCHAT_PRICE)],

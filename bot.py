@@ -3,11 +3,13 @@ import logging
 import os
 from pathlib import Path
 from typing import Any, Optional
+from uuid import uuid4
 
 from telegram import (
     BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    LabeledPrice,
     Update,
 )
 from telegram.constants import ChatAction
@@ -17,6 +19,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    PreCheckoutQueryHandler,
     filters,
 )
 
@@ -38,6 +41,10 @@ ADMIN_ID = int(os.getenv("BOT_ADMIN_ID", "8561249287"))
 USER_STORE_FILE = Path(os.getenv("USER_STORE_FILE", "bot_users.json"))
 CHANNEL_URL = "https://t.me/+LIVzUK7_TxphNGZk"
 CONTACT_ADMIN_CALLBACK = "contact_admin"
+SNAPCHAT_CALLBACK = "buy_snapchat"
+SNAPCHAT_USERNAME = "Sela.mon"
+SNAPCHAT_PRICE = 500
+SNAPCHAT_PAYLOAD_PREFIX = "snapchat_500_stars"
 MAX_HISTORY_MESSAGES = 20
 OPENAI_QUOTA_ERROR_CODES = {"insufficient_quota", "credit_balance_exhausted"}
 
@@ -49,7 +56,7 @@ SYSTEM_PROMPT = """أنت مساعد تيليجرام سعودي ذكي ولطي
 - استخدم اللهجة السعودية الطبيعية إذا كان المستخدم يتحدث بالعربية، وتحدث بلغة المستخدم.
 - لا تخترع معلومات. إذا لم تكن متأكدًا فاذكر ذلك بوضوح.
 - كن لطيفًا وخفيف دم، واستخدم الإيموجي باعتدال.
-- لا تسأل أسئلة غير ضرورية؛ وإذا كان الطلب واضحًا نفذه مباشرة.
+- لا تسأل أسئلة غير ضرورية؛ وإذا كان الطلب واضحًا نفذه م��اشرة.
 - إذا سأل المستخدم «وش نوعك؟» أو عن نوعك، أجب حرفيًا: «انا بوت اقصد بوث 😝».
 - لا تستخدم محتوى جنسيًا صريحًا أو يستغل القاصرين أو يتضمن إكراهًا.
 """
@@ -65,7 +72,7 @@ elif not AsyncOpenAI:
 
 
 def load_store() -> dict[str, Any]:
-    default = {"next_person": 1, "users": {}, "admin_messages": {}}
+    default = {"next_person": 1, "users": {}, "admin_messages": {}, "payments": []}
     try:
         if USER_STORE_FILE.exists():
             data = json.loads(USER_STORE_FILE.read_text(encoding="utf-8"))
@@ -112,6 +119,7 @@ def channel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("📣 انضم الآن إلى القناة", url=CHANNEL_URL)],
+            [InlineKeyboardButton("👻 Snapchat", callback_data=SNAPCHAT_CALLBACK)],
             [InlineKeyboardButton("✉️ إرسال رسالة لصاحب البوت", callback_data=CONTACT_ADMIN_CALLBACK)],
         ]
     )
@@ -187,6 +195,70 @@ async def contact_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await query.message.reply_text("اكتب رسالتك الحين، وبوصلها لصاحب البوت ويرد عليك 🧡")
 
 
+async def create_snapchat_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.message or not query.from_user:
+        return
+    await query.answer()
+    payload = f"{SNAPCHAT_PAYLOAD_PREFIX}:{query.from_user.id}:{uuid4().hex}"
+    await query.message.reply_invoice(
+        title="Snapchat 👻",
+        description="احصل على حساب Snapchat بعد إتمام دفع 500 نجمة.",
+        payload=payload,
+        currency="XTR",
+        prices=[LabeledPrice("Snapchat Sela.mon", SNAPCHAT_PRICE)],
+        provider_token="",
+        start_parameter="snapchat-sela-mon",
+    )
+
+
+async def precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.pre_checkout_query
+    if not query:
+        return
+    valid_payload = query.invoice_payload.startswith(f"{SNAPCHAT_PAYLOAD_PREFIX}:")
+    if query.currency != "XTR" or query.total_amount != SNAPCHAT_PRICE or not valid_payload:
+        await query.answer(ok=False, error_message="بيانات الدفع غير صحيحة، حاول مرة أخرى.")
+        return
+    await query.answer(ok=True)
+
+
+async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if not message or not message.successful_payment or not message.from_user:
+        return
+    payment = message.successful_payment
+    if payment.currency != "XTR" or payment.total_amount != SNAPCHAT_PRICE:
+        return
+
+    record = {
+        "product": "snapchat",
+        "user_id": message.from_user.id,
+        "username": message.from_user.username or "",
+        "amount": payment.total_amount,
+        "currency": payment.currency,
+        "telegram_payment_charge_id": payment.telegram_payment_charge_id,
+    }
+    STORE.setdefault("payments", []).append(record)
+    save_store()
+
+    await message.reply_text(
+        f"تم الدفع بنجاح ✅\n\nحساب Snapchat الخاص بك هو:\n{SNAPCHAT_USERNAME} 👻"
+    )
+    try:
+        await message.get_bot().send_message(
+            chat_id=ADMIN_ID,
+            text=(
+                "💰 عملية شراء Snapchat جديدة\n"
+                f"المستخدم: {message.from_user.id}\n"
+                f"المبلغ: {payment.total_amount} نجمة\n"
+                f"Charge ID: {payment.telegram_payment_charge_id}"
+            ),
+        )
+    except Exception:
+        logger.exception("Could not notify admin about successful payment")
+
+
 async def deliver_to_admin(update: Update) -> bool:
     message = update.message
     if not message or not message.from_user or message.from_user.id == ADMIN_ID:
@@ -199,7 +271,7 @@ async def deliver_to_admin(update: Update) -> bool:
             f"🆔 ID: {message.from_user.id}\n"
             f"👤 username: @{message.from_user.username}"
             if message.from_user.username
-            else f"📩 رسالة جديدة من {display_name(record)}\n🆔 ID: {message.from_user.id}"
+            else f"📩 رس��لة جديدة من {display_name(record)}\n🆔 ID: {message.from_user.id}"
         ),
     )
     STORE["admin_messages"][str(header.message_id)] = message.from_user.id
@@ -353,6 +425,9 @@ def main() -> None:
     application.add_handler(CommandHandler("rename", rename))
     application.add_handler(CommandHandler("people", people))
     application.add_handler(CallbackQueryHandler(contact_admin, pattern=f"^{CONTACT_ADMIN_CALLBACK}$"))
+    application.add_handler(CallbackQueryHandler(create_snapchat_invoice, pattern=f"^{SNAPCHAT_CALLBACK}$"))
+    application.add_handler(PreCheckoutQueryHandler(precheckout))
+    application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
     application.add_handler(
         MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.TEXT, forward_any_message),
         group=0,

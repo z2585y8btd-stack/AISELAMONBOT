@@ -32,7 +32,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("AISELAMONBOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 ADMIN_ID = int(os.getenv("BOT_ADMIN_ID", "8561249287"))
 USER_STORE_FILE = Path(os.getenv("USER_STORE_FILE", "bot_users.json"))
@@ -53,9 +53,14 @@ SYSTEM_PROMPT = """أنت مساعد تيليجرام سعودي لطيف وخف
 - إذا كان الطلب غير واضح، أعطِ أفضل جواب مفيد بدل طرح سؤال.
 """
 
-client: Optional[object] = None
+client: Optional[AsyncOpenAI] = None
 if OPENAI_API_KEY and AsyncOpenAI:
     client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    logger.info("OpenAI enabled with model %s", OPENAI_MODEL)
+elif not OPENAI_API_KEY:
+    logger.warning("OPENAI_API_KEY is not set; using fallback replies")
+elif not AsyncOpenAI:
+    logger.error("The openai package is not installed; using fallback replies")
 
 
 def load_store() -> dict[str, Any]:
@@ -154,7 +159,7 @@ async def contact_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     await query.answer()
     context.user_data["awaiting_admin_message"] = True
-    await query.message.reply_text("اكتب رسالتك ال��ن، وبوصلها لصاحب البوت ويرد عليك 🧡")
+    await query.message.reply_text("اكتب رسالتك الحين، وبوصلها لصاحب البوت ويرد عليك 🧡")
 
 
 async def deliver_to_admin(update: Update) -> bool:
@@ -183,7 +188,7 @@ async def deliver_to_admin(update: Update) -> bool:
         logger.exception("Could not copy user message to admin")
         await message.get_bot().send_message(
             chat_id=ADMIN_ID,
-            text="تعذر نسخ ن��ع هذه الرسالة تلقائيًا؛ تواصل مع المستخدم عبر الـ ID أعلاه.",
+            text="تعذر نسخ نوع هذه الرسالة تلقائيًا؛ تواصل مع المستخدم عبر الـ ID أعلاه.",
             reply_to_message_id=header.message_id,
         )
     save_store()
@@ -206,7 +211,7 @@ async def admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> boo
         await message.reply_text("تم إرسال الرد ✅")
     except Exception:
         logger.exception("Could not send admin reply")
-        await message.reply_text("ما قدرت أرسل الرد؛ يمكن المستخدم حظر البوت.")
+        await message.reply_text("ما قدرت ��رسل الرد؛ يمكن المستخدم حظر البوت.")
     return True
 
 
@@ -303,7 +308,11 @@ def main() -> None:
     application.add_handler(CommandHandler("rename", rename))
     application.add_handler(CommandHandler("people", people))
     application.add_handler(CallbackQueryHandler(contact_admin, pattern=f"^{CONTACT_ADMIN_CALLBACK}$"))
-    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, forward_any_message), group=0)
+    # Do not let this catch text messages before respond() can call OpenAI.
+    application.add_handler(
+        MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.TEXT, forward_any_message),
+        group=0,
+    )
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, respond), group=1)
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 

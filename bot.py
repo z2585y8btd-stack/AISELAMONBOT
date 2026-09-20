@@ -38,30 +38,28 @@ ADMIN_ID = int(os.getenv("BOT_ADMIN_ID", "8561249287"))
 USER_STORE_FILE = Path(os.getenv("USER_STORE_FILE", "bot_users.json"))
 CHANNEL_URL = "https://t.me/+LIVzUK7_TxphNGZk"
 CONTACT_ADMIN_CALLBACK = "contact_admin"
+MAX_HISTORY_MESSAGES = 20
 
-SYSTEM_PROMPT = """أنت مساعد تيليجرام سعودي لطيف وخفيف دم.
+SYSTEM_PROMPT = """أنت مساعد تيليجرام سعودي ذكي ولطيف وخفيف دم.
 
 التزم دائمًا بهذه القواعد:
-- أجب مباشرة ولا تسأل المستخدم أي سؤال.
-- اجعل الرد قصيرًا وعلى قد السؤال، غالبًا جملة أو جملتين فقط.
-- لا تكتب مقدمات أو شرحًا طويلًا ولا تكرر كلام المستخدم.
-- استخدم اللهجة السعودية الطبيعية بدون مبالغة.
-- أضف أحيانًا إيموجي لطيفًا مثل 🥹 🧡 🔥 😂، ولا تكثر منها.
-- كن كوميديًا ولطيفًا، ويمكنك استخدام إيحاء خفيف ومرح غير فاضح وغير جنسي صريح.
-- لا تستخدم محتوى جنسيًا صريحًا أو يستغل القاصنين أو يتضمن إكراهًا.
-- لا تختم بسؤال مثل: هل تحتاج شيئًا آخر؟
-- إذا كان الطلب غير واضح، أعطِ أفضل جواب مفيد بدل طرح سؤال.
+- افهم سياق المحادثة السابقة واستفد منه، ولا تبدأ من الصفر في كل رسالة.
+- أجب بدقة وبشكل مفيد، وقدم شرحًا مفصلًا عندما يطلب المستخدم ذلك.
+- استخدم اللهجة السعودية الطبيعية إذا كان المستخدم يتحدث بالعربية، وتحدث بلغة المستخدم.
+- لا تخترع معلومات. إذا لم تكن متأكدًا فاذكر ذلك بوضوح.
+- كن لطيفًا وخفيف دم، واستخدم الإيموجي باعتدال.
+- لا تسأل أسئلة غير ضرورية؛ وإذا كان الطلب واضحًا نفذه مباشرة.
+- لا تستخدم محتوى جنسيًا صريحًا أو يستغل القاصرين أو يتضمن إكراهًا.
 """
 
 client: Optional[AsyncOpenAI] = None
 if OPENAI_API_KEY and AsyncOpenAI:
-    # مهلة قصيرة وإعادة محاولة تلقائية تمنع بقاء البوت معل��قًا عند تعطل الشبكة أو الخدمة.
-    client = AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=20.0, max_retries=2)
+    client = AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=45.0, max_retries=2)
     logger.info("OpenAI enabled with model %s", OPENAI_MODEL)
 elif not OPENAI_API_KEY:
-    logger.warning("OPENAI_API_KEY is not set; using fallback replies")
+    logger.error("OPENAI_API_KEY is not set; AI replies are disabled")
 elif not AsyncOpenAI:
-    logger.error("The openai package is not installed; using fallback replies")
+    logger.error("The openai package is not installed; AI replies are disabled")
 
 
 def load_store() -> dict[str, Any]:
@@ -135,7 +133,7 @@ def fallback_reply(text: str) -> str:
         return "العفو يا بعدي 🥹"
     if "كيفك" in lowered or "شلونك" in lowered:
         return "بخير دامك بخير 🔥"
-    return "وصلت رسالتك يا بعدي 🧡 الذكاء الاصطناعي تأخر شوي، لكن البوت شغال. جرّب ترسلها مرة ثانية بعد لحظة."
+    return "حاليًا ما قدرت أتصل بخدمة الذكاء الاصطناعي. تأكد من OPENAI_API_KEY وحاول بعد لحظة."
 
 
 async def send_channel_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -148,8 +146,9 @@ async def send_channel_link(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message:
+        context.user_data["ai_history"] = []
         await update.message.reply_text(
-            "يا هلا! نورت ي�� بعدي 🥹🧡\n\nتقدر تدخل القناة أو ترسل رسالة مباشرة لصاحب البوت:",
+            "يا هلا! نورت يا بعدي 🥹🧡\n\nتقدر تدخل القناة أو ترسل رسالة مباشرة لصاحب البوت:",
             reply_markup=channel_keyboard(),
         )
 
@@ -264,22 +263,25 @@ async def respond(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not client:
         reply = fallback_reply(text)
     else:
+        history = context.user_data.setdefault("ai_history", [])
+        history.append({"role": "user", "content": text})
+        history[:] = history[-MAX_HISTORY_MESSAGES:]
         try:
             completion = await client.chat.completions.create(
                 model=OPENAI_MODEL,
-                temperature=0.85,
-                max_tokens=120,
+                temperature=0.7,
+                max_tokens=600,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": text},
+                    *history,
                 ],
             )
             reply = (completion.choices[0].message.content or "").strip()
             if not reply:
-                logger.warning("OpenAI returned an empty response")
-                reply = fallback_reply(text)
+                raise RuntimeError("OpenAI returned an empty response")
+            history.append({"role": "assistant", "content": reply})
+            history[:] = history[-MAX_HISTORY_MESSAGES:]
         except Exception:
-            # لا نترك المستخدم برسالة خطأ بسبب تعطل مؤقت أو انتهاء مهلة OpenAI.
             logger.exception("AI request failed for model %s", OPENAI_MODEL)
             reply = fallback_reply(text)
     await message.reply_text(reply)
@@ -307,13 +309,16 @@ async def set_commands(application: Application) -> None:
 def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("The AISELAMONBOT_TOKEN environment secret is not set")
+    if not OPENAI_API_KEY:
+        raise RuntimeError("The OPENAI_API_KEY environment secret is required for AI mode")
+    if not AsyncOpenAI:
+        raise RuntimeError("The openai package is required for AI mode")
     application = Application.builder().token(BOT_TOKEN).post_init(set_commands).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("channel", send_channel_link))
     application.add_handler(CommandHandler("rename", rename))
     application.add_handler(CommandHandler("people", people))
     application.add_handler(CallbackQueryHandler(contact_admin, pattern=f"^{CONTACT_ADMIN_CALLBACK}$"))
-    # Do not let this catch text messages before respond() can call OpenAI.
     application.add_handler(
         MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.TEXT, forward_any_message),
         group=0,
